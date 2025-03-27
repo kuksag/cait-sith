@@ -1,20 +1,17 @@
-use k256::{AffinePoint, Secp256k1};
+use std::collections::HashMap;
+use k256::{AffinePoint, Scalar, Secp256k1};
 use std::error::Error;
 
 use crate::compat::scalar_hash;
 
 use crate::ecdsa::dkg_ecdsa::{keygen, refresh, reshare};
-use crate::ecdsa::{
-    presign::{presign, PresignArguments, PresignOutput},
-    sign::{sign, FullSignature},
-    triples::{self, TriplePub, TripleShare},
-    KeygenOutput,
-};
+use crate::ecdsa::{dkg_ecdsa, presign, presign::{presign, PresignArguments, PresignOutput}, sign, sign::{sign, FullSignature}, triples::{self, TriplePub, TripleShare}, KeygenOutput};
 use crate::protocol::{run_protocol, Participant, Protocol};
 
 use frost_secp256k1::keys::{PublicKeyPackage, VerifyingShare};
 use frost_secp256k1::Group;
 use rand_core::OsRng;
+use crate::ecdsa::triples::{generate_triple, TripleGenerationOutput};
 
 /// runs distributed keygen
 pub(crate) fn run_keygen(
@@ -282,3 +279,100 @@ fn test_e2e() -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
+
+
+/// Convenient test utilities to generate keys, triples, presignatures, and signatures.
+pub struct TestGenerators {
+    pub participants: Vec<Participant>,
+    pub threshold: usize,
+}
+
+type ParticipantAndProtocol<T> = (Participant, Box<dyn Protocol<Output = T>>);
+
+impl TestGenerators {
+    pub fn new(num_participants: usize, threshold: usize) -> Self {
+        Self {
+            participants: (0..num_participants)
+                .map(|_| Participant::from(rand::random::<u32>()))
+                .collect::<Vec<_>>(),
+            threshold,
+        }
+    }
+
+    pub fn make_keygens(&self) -> HashMap<Participant, KeygenOutput> {
+        let mut protocols: Vec<ParticipantAndProtocol<KeygenOutput>> = Vec::new();
+        for participant in &self.participants {
+            protocols.push((
+                *participant,
+                Box::new(
+                    dkg_ecdsa::keygen(
+                        &self.participants,
+                        *participant,
+                        self.threshold,
+                    )
+                        .unwrap(),
+                ),
+            ));
+        }
+        run_protocol(protocols).unwrap().into_iter().collect()
+    }
+
+    pub fn make_triples(&self) -> HashMap<Participant, TripleGenerationOutput<Secp256k1>> {
+        let mut protocols: Vec<ParticipantAndProtocol<TripleGenerationOutput<Secp256k1>>> =
+            Vec::new();
+        for participant in &self.participants {
+            protocols.push((
+                *participant,
+                Box::new(
+                    generate_triple::<Secp256k1>(
+                        &self.participants,
+                        *participant,
+                        self.threshold,
+                    )
+                        .unwrap(),
+                ),
+            ));
+        }
+        run_protocol(protocols).unwrap().into_iter().collect()
+    }
+
+    pub fn make_presignatures(
+        &self,
+        triple0s: &HashMap<Participant, TripleGenerationOutput<Secp256k1>>,
+        triple1s: &HashMap<Participant, TripleGenerationOutput<Secp256k1>>,
+        keygens: &HashMap<Participant, KeygenOutput>,
+    ) -> HashMap<Participant, PresignOutput<Secp256k1>> {
+        let mut protocols: Vec<ParticipantAndProtocol<PresignOutput<Secp256k1>>> = Vec::new();
+        for participant in &self.participants {
+            protocols.push((
+                *participant,
+                Box::new(
+                    presign::presign(
+                        &self.participants,
+                        *participant,
+                        &self.participants,
+                        *participant,
+                        PresignArguments {
+                            triple0: triple0s[participant].clone(),
+                            triple1: triple1s[participant].clone(),
+                            keygen_out: keygens[participant].clone(),
+                            threshold: self.threshold,
+                        },
+                    )
+                        .unwrap(),
+                ),
+            ));
+        }
+        run_protocol(protocols).unwrap().into_iter().collect()
+    }
+}
+
+#[test]
+fn benchmark_single_threaded_signature_generation() {
+    let generator = TestGenerators::new(3, 2);
+    let keygens = generator.make_keygens();
+    let triple0s = generator.make_triples();
+    let triple1s = generator.make_triples();
+    let _ = generator.make_presignatures(&triple0s, &triple1s, &keygens);
+}
+
