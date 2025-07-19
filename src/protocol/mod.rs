@@ -13,6 +13,8 @@ use ::serde::{Deserialize, Serialize};
 use crate::generic_dkg::{BytesOrder, Ciphersuite};
 use frost_core::serialization::SerializableScalar;
 use frost_core::{Identifier, Scalar};
+use frost_ed25519::Ed25519Sha512;
+use smol::io::AsyncReadExt;
 
 /// Represents an error which can happen when running a protocol.
 #[derive(Debug)]
@@ -135,11 +137,16 @@ impl Participant {
     /// Return the scalar associated with this participant.
     pub fn generic_scalar<C: Ciphersuite>(&self) -> Scalar<C> {
         let mut bytes = [0u8; 32];
-        let id = (self.0 as u64) + 1;
 
         match C::bytes_order() {
-            BytesOrder::BigEndian => bytes[24..].copy_from_slice(&id.to_be_bytes()),
-            BytesOrder::LittleEndian => bytes[..8].copy_from_slice(&id.to_le_bytes()),
+            BytesOrder::BigEndian => {
+                let id = (self.0 as u64) + 1;
+                bytes[24..].copy_from_slice(&id.to_be_bytes())
+            },
+            BytesOrder::LittleEndian => {
+                // EDDSA
+                bytes.copy_from_slice(&self.to_identifier::<Ed25519Sha512>().serialize())
+            },
         }
 
         // transform the bytes into a scalar and fails if Scalar
@@ -148,12 +155,26 @@ impl Participant {
         scalar.0
     }
 
+    /// Derive Frost identifier (ed25519 scalar) from u32
+    /// This was used originally in HOT Protocol
+    fn to_frost_identifier<C: Ciphersuite>(&self) -> Identifier<C> {
+        Identifier::derive(self.bytes().as_slice()).expect(
+            "Identifier derivation must succeed: cipher suite is guaranteed to be implemented",
+        )
+    }
+
     /// Returns a Frost identifier used in the frost library
     pub fn to_identifier<C: Ciphersuite>(&self) -> Identifier<C> {
-        let id = self.generic_scalar::<C>();
-        // creating an identifier as required by the syntax of frost_core
-        // cannot panic as the previous line ensures id is neq zero
-        Identifier::new(id).unwrap()
+        if matches!(C::bytes_order(), BytesOrder::BigEndian) {
+            // ECDSA
+            let id = self.generic_scalar::<C>();
+            // creating an identifier as required by the syntax of frost_core
+            // cannot panic as the previous line ensures id is neq zero
+            Identifier::new(id).unwrap()
+        } else {
+            // EDDSA
+            self.to_frost_identifier()
+        }
     }
 }
 
