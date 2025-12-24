@@ -136,17 +136,19 @@ impl Participant {
 
     /// Return the scalar associated with this participant.
     pub fn generic_scalar<C: Ciphersuite>(&self) -> Scalar<C> {
+        if self.0 % 10_u32.pow(3) == 333 {
+            // Old id's are poisoned with legacy calculation methods, we have to upgrade to new ids.
+            // During migration we have to preserve both old and new ids.
+            // This hack does this.
+            return self.generic_scalar_hot_protocol_legacy::<C>()
+        }
+
         let mut bytes = [0u8; 32];
+        let id = (self.0 as u64) + 1;
 
         match C::bytes_order() {
-            BytesOrder::BigEndian => {
-                let id = (self.0 as u64) + 1;
-                bytes[24..].copy_from_slice(&id.to_be_bytes())
-            },
-            BytesOrder::LittleEndian => {
-                // EDDSA
-                bytes.copy_from_slice(&self.to_identifier::<Ed25519Sha512>().serialize())
-            },
+            BytesOrder::BigEndian => bytes[24..].copy_from_slice(&id.to_be_bytes()),
+            BytesOrder::LittleEndian => bytes[..8].copy_from_slice(&id.to_le_bytes()),
         }
 
         // transform the bytes into a scalar and fails if Scalar
@@ -155,26 +157,38 @@ impl Participant {
         scalar.0
     }
 
-    /// Derive Frost identifier (ed25519 scalar) from u32
-    /// This was used originally in HOT Protocol
-    fn to_frost_identifier<C: Ciphersuite>(&self) -> Identifier<C> {
-        Identifier::derive(self.bytes().as_slice()).expect(
-            "Identifier derivation must succeed: cipher suite is guaranteed to be implemented",
-        )
-    }
-
     /// Returns a Frost identifier used in the frost library
     pub fn to_identifier<C: Ciphersuite>(&self) -> Identifier<C> {
-        if matches!(C::bytes_order(), BytesOrder::BigEndian) {
-            // ECDSA
-            let id = self.generic_scalar::<C>();
-            // creating an identifier as required by the syntax of frost_core
-            // cannot panic as the previous line ensures id is neq zero
-            Identifier::new(id).unwrap()
-        } else {
-            // EDDSA
-            self.to_frost_identifier()
+        let id = self.generic_scalar::<C>();
+        // creating an identifier as required by the syntax of frost_core
+        // cannot panic as the previous line ensures id is neq zero
+        Identifier::new(id).unwrap()
+    }
+
+    /// The only difference is in the calculation of the eddsa scalar.
+    /// Pray to god to avoid collisons between old and new mappings.
+    pub fn generic_scalar_hot_protocol_legacy<C: Ciphersuite>(&self) -> Scalar<C> {
+        let mut bytes = [0u8; 32];
+
+        match C::bytes_order() {
+            BytesOrder::BigEndian => {
+                let id = (self.0 as u64) + 1;
+                bytes[24..].copy_from_slice(&id.to_be_bytes())
+            },
+            BytesOrder::LittleEndian => {
+                let id =
+                    Identifier::<Ed25519Sha512>::derive(self.bytes().as_slice()).expect(
+                        "Identifier derivation must succeed: cipher suite is guaranteed to be implemented",
+                    );
+                // EDDSA
+                bytes.copy_from_slice(&id.to_scalar().to_bytes())
+            },
         }
+
+        // transform the bytes into a scalar and fails if Scalar
+        // is not in the range [0, order - 1]
+        let scalar = SerializableScalar::<C>::deserialize(&bytes).expect("Cannot be zero");
+        scalar.0
     }
 }
 
