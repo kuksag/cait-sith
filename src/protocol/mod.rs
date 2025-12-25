@@ -136,7 +136,7 @@ impl Participant {
 
     /// Return the scalar associated with this participant.
     pub fn generic_scalar<C: Ciphersuite>(&self) -> Scalar<C> {
-        if self.0 % 10_u32.pow(3) == 333 {
+        if self.0 % 10_u32.pow(3) != 333 {
             // Old id's are poisoned with legacy calculation methods, we have to upgrade to new ids.
             // During migration we have to preserve both old and new ids.
             // This hack does this.
